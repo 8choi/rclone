@@ -161,6 +161,32 @@ type TokenSource struct {
 func (ts *TokenSource) Token() (*oauth2.Token, error) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	changed := false
+
+	// If token has expired then first try re-reading it from the config
+	// file in case a concurrently runnng rclone has updated it already
+	if !ts.token.Valid() {
+		tokenString, err := config.FileGetFresh(ts.name, config.ConfigToken)
+		if err != nil {
+			fs.Debugf(ts.name, "Failed to read token out of config file: %v", err)
+		} else {
+			newToken := new(oauth2.Token)
+			err := json.Unmarshal([]byte(tokenString), newToken)
+			if err != nil {
+				fs.Debugf(ts.name, "Failed to parse token out of config file: %v", err)
+			} else {
+				if newToken.Valid() {
+					fs.Debugf(ts.name, "Loaded fresh token from config file")
+					ts.token = newToken
+					ts.tokenSource = nil // invalidate since we changed the token
+					changed = true
+				} else {
+					fs.Debugf(ts.name, "Loaded invalid token from config file - ignoring")
+				}
+			}
+
+		}
+	}
 
 	// Make a new token source if required
 	if ts.tokenSource == nil {
@@ -171,7 +197,7 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	changed := *token != *ts.token
+	changed = changed || (*token != *ts.token)
 	ts.token = token
 	if changed {
 		// Bump on the expiry timer if it is set
